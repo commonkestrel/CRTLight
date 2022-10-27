@@ -4,13 +4,13 @@ import (
     "encoding/hex"
     "encoding/json"
     "fmt"
+    "image"
     "image/color"
     "math"
     "os"
     "strings"
     "time"
-    "image"
-    
+
     _ "image/png"
 
     "github.com/faiface/pixel"
@@ -18,8 +18,8 @@ import (
     "github.com/faiface/pixel/pixelgl"
     "github.com/faiface/pixel/text"
     "github.com/go-vgo/robotgo/clipboard"
-    "github.com/sqweek/dialog"
     "github.com/nfnt/resize"
+    "github.com/sqweek/dialog"
     "golang.org/x/image/colornames"
     "golang.org/x/image/font/basicfont"
 )
@@ -30,25 +30,35 @@ const (
     yStart   = (1080 - 900) / 2.0
     yCm      = 3 / 5.0 * DIAGONAL
     xCm      = 4 / 5.0 * DIAGONAL
-    stepCm   = 100/60.0
+    stepCm   = 100 / 60.0
 
     CIRSIZE = 40
 )
+
+type export struct {
+    Frames    []Frame
+    Fps       int
+    Loop      bool
+    LoopDelay time.Duration
+}
 
 var (
     win *pixelgl.Window
     imd *imdraw.IMDraw
 
-    Text     string
-    coloring = -1
-    ZL       = light{}
-    fps      = 4
-    anim     bool
+    Text string
 
-    frames = [][]*light{}
-    frame  *[]*light
+    ncolor   = pixel.V(-1, -1)
+    coloring = ncolor
+
+    ZL   color.Color
+    fps  = 4
+    anim bool
+
+    frames []Frame
+    frame  *Frame
     fn     int
-    ZF     []*light
+    ZF     Frame
 )
 
 type arrow struct {
@@ -95,29 +105,28 @@ func (a *arrow) Draw() {
     imd.Circle(2.5, 0)
 }
 
-type light struct {
-    Color color.RGBA
-    Pos   pixel.Vec
-    Index [2]int
+func Draw(pos pixel.Vec, rgb color.Color) {
+    glow(pos, CIRSIZE, pixel.ToRGBA(rgb))
 }
 
-func NewLight(pos pixel.Vec, rgb color.RGBA, x, y int) *light {
-    return &light{rgb, pos, [2]int{x, y}}
+type Frame [15][11]color.RGBA
+
+func (f *Frame) Draw() {
+    for x := 0; x < len(f); x++ {
+        for y := len(f[x]) - 1; y >= 0; y-- {
+            l := f[x][y]
+            if l != colornames.Black {
+                pos := pixel.V((float64(x)/14*1200)+xStart+1, (float64(y)/10.0*900.0)+yStart+22)
+                Draw(pos, l)
+            }
+        }
+    }
 }
 
-func (l *light) Draw() {
-    glow(l.Pos, CIRSIZE, pixel.ToRGBA(l.Color))
-}
-
-func frameInit(frame *[]*light) {
-    *frame = []*light{}
-    for y := 0.0; y < yCm/stepCm; y++ {
-        for x := 0.0; x < xCm/stepCm; x++ {
-            rgb := colornames.Black
-            pos := pixel.V((x/(xCm/stepCm)*1200)+xStart+1, (y/(yCm/stepCm)*900)+yStart+22)
-
-            l := NewLight(pos, rgb, int(x), int(y))
-            *frame = append(*frame, l)
+func (f *Frame) Init() {
+    for x, col := range f {
+        for y := range col {
+            f[x][y] = colornames.Black
         }
     }
 }
@@ -132,8 +141,13 @@ func Save() {
         path += ".json"
     }
 
+    ex := export{
+        Frames: frames,
+        Fps:    fps,
+    }
+
     file, _ := os.Create(path)
-    marshaled, err := json.Marshal(frames)
+    marshaled, err := json.Marshal(ex)
     if err != nil {
         return
     }
@@ -142,7 +156,7 @@ func Save() {
 }
 
 func Load() {
-    var opened [][]*light
+    var opened export
     path, err := dialog.File().Filter("Json File (*.json)", "json").Load()
     if err != nil {
         return
@@ -151,7 +165,8 @@ func Load() {
     file, _ := os.ReadFile(path)
 
     json.Unmarshal(file, &opened)
-    frames = opened
+    fps = opened.Fps
+    frames = opened.Frames
     fn = 0
     frame = &frames[fn]
 }
@@ -174,16 +189,15 @@ func Image() {
 
     resized := resize.Resize(uint(math.Floor(xCm/stepCm))+1, uint(math.Floor(yCm/stepCm))+1, img, resize.NearestNeighbor)
 
-    for y := int(math.Floor(yCm/stepCm)+1)-1; y >= 0; y-- {
+    for y := int(math.Floor(yCm/stepCm)+1) - 1; y >= 0; y-- {
         for x := 0; x < int(math.Floor(xCm/stepCm)+1); x++ {
-                pix := resized.At(x, int(math.Floor(yCm/stepCm))-y)
-                r, g, b, _ := pix.RGBA()
-                r /= 256
-                g /= 256
-                b /= 256
+            pix := resized.At(x, int(math.Floor(yCm/stepCm))-y)
+            r, g, b, _ := pix.RGBA()
+            r /= 256
+            g /= 256
+            b /= 256
 
-                i := y * int(math.Floor(xCm/stepCm)+1) + x
-                (*frame)[i].Color = color.RGBA{uint8(r), uint8(g), uint8(b), 255}
+            frame[x][y] = color.RGBA{uint8(r), uint8(g), uint8(b), 255}
         }
     }
 }
@@ -219,20 +233,20 @@ func Anim(stop chan bool) {
 }
 
 func loadPicture(path string) (pixel.Picture, error) {
-	file, err := os.Open(path)
-	if err != nil {
-		return nil, err
-	}
-	defer file.Close()
-	img, _, err := image.Decode(file)
-	if err != nil {
-		return nil, err
-	}
-	return pixel.PictureDataFromImage(img), nil
+    file, err := os.Open(path)
+    if err != nil {
+        return nil, err
+    }
+    defer file.Close()
+    img, _, err := image.Decode(file)
+    if err != nil {
+        return nil, err
+    }
+    return pixel.PictureDataFromImage(img), nil
 }
 
 func run() {
-    frameInit(&ZF)
+    ZF.Init()
 
     monitor := pixelgl.PrimaryMonitor()
     PositionX, PositionY := monitor.Position()
@@ -246,7 +260,7 @@ func run() {
         Bounds:    screen,
         Resizable: false,
         Maximized: true,
-        Icon: []pixel.Picture{icon},
+        Icon:      []pixel.Picture{icon},
     }
     var err error
     win, err = pixelgl.NewWindow(cfg)
@@ -272,9 +286,10 @@ func run() {
     speedUp := NewArrow(pixel.V(screen.Center().X, yStart+900), pixel.V(20, 40))
     slowDown := NewArrow(pixel.V(screen.Center().X, yStart+900), pixel.V(-20, 40))
 
-    frames = append(frames, []*light{})
+    frames = append(frames, Frame{})
     frame = &frames[fn]
-    frameInit(frame)
+    frame.Init()
+    fmt.Println(len(frame))
 
     next := NewArrow(pixel.V(1920-50, 10), pixel.V(40, 80))
     back := NewArrow(pixel.V(50, 10), pixel.V(-40, 80))
@@ -290,8 +305,8 @@ func run() {
         if leftPress && next.Contains(mouse) {
             fn++
             if len(frames)-1 < fn {
-                newFrame := []*light{}
-                frameInit(&newFrame)
+                newFrame := Frame{}
+                newFrame.Init()
                 frames = append(frames, newFrame)
             }
             frame = &frames[fn]
@@ -300,10 +315,12 @@ func run() {
         if leftPress && back.Contains(mouse) {
             if fn > 0 {
                 empty := true
-                for _, l := range *frame {
-                    if l.Color != colornames.Black {
-                        empty = false
-                        break
+                for _, col := range *frame {
+                    for _, l := range col {
+                        if l != colornames.Black {
+                            empty = false
+                            break
+                        }
                     }
                 }
                 if empty && fn == len(frames)-1 {
@@ -313,7 +330,7 @@ func run() {
                 fn--
                 frame = &frames[fn]
             } else {
-                fn = len(frames)-1
+                fn = len(frames) - 1
                 frame = &frames[fn]
             }
         }
@@ -324,12 +341,14 @@ func run() {
         frameTxt.Clear()
 
         if win.JustPressed(pixelgl.KeyEscape) {
-            if coloring == -1 {
+            if coloring.Eq(ncolor) {
                 win.SetClosed(true)
+            } else {
+
+                coloring = ncolor
+                fmt.Fprint(txt, Text)
+                Text = ""
             }
-            coloring = -1
-            fmt.Fprint(txt, Text)
-            Text = ""
         }
 
         imd.Color = colornames.Black
@@ -337,41 +356,44 @@ func run() {
         imd.Push(pixel.V(xStart+1200, yStart+900))
         imd.Rectangle(0)
 
-        for i, l := range *frame {
-            if l.Color != colornames.Black {
-                l.Draw()
-            }
-            if l.Pos.Sub(mouse).Len() <= CIRSIZE && mouse.X > xStart && mouse.Y > yStart && mouse.X < xStart+1200 && mouse.Y < yStart+900 {
-                if win.JustPressed(pixelgl.MouseButtonLeft) && coloring != i {
-                    coloring = i
-                    fmt.Fprint(txt, Text)
-                    Text = ""
-                }
-                if win.JustPressed(pixelgl.MouseButtonRight) {
-                    l.Color = colornames.Black
-                    if i == coloring {
-                        coloring = -1
+        frame.Draw()
+
+        for x, col := range *frame {
+            for y, l := range col {
+                pos := pixel.V((float64(x)/14*1200)+xStart+1, (float64(y)/10*900)+yStart+22)
+                i := pixel.V(float64(x), float64(y))
+
+                if pos.Sub(mouse).Len() <= CIRSIZE && mouse.X > xStart && mouse.Y > yStart && mouse.X < xStart+1200 && mouse.Y < yStart+900 {
+                    if win.JustPressed(pixelgl.MouseButtonLeft) && coloring != i {
+                        coloring = i
+                        fmt.Fprint(txt, Text)
                         Text = ""
                     }
-                }
+                    if win.JustPressed(pixelgl.MouseButtonRight) {
+                        frame[x][y] = colornames.Black
+                        if coloring.Eq(i) {
+                            coloring = ncolor
+                            Text = ""
+                        }
+                    }
 
-                if (win.Pressed(pixelgl.KeyLeftControl) || win.Pressed(pixelgl.KeyRightControl)) && win.JustPressed(pixelgl.KeyC) {
-                    clipboard.WriteAll(fmt.Sprintf("#%.2X%.2X%.2X", l.Color.R, l.Color.G, l.Color.B))
-                }
+                    if (win.Pressed(pixelgl.KeyLeftControl) || win.Pressed(pixelgl.KeyRightControl)) && win.JustPressed(pixelgl.KeyC) {
+                        clipboard.WriteAll(fmt.Sprintf("#%.2X%.2X%.2X", l.R, l.G, l.B))
+                    }
 
-                if coloring == -1 && l.Color != colornames.Black {
-                    hex := fmt.Sprintf("%.2X%.2X%.2X", l.Color.R, l.Color.G, l.Color.B)
-                    fmt.Fprint(txt, hex)
+                    if coloring.Eq(ncolor) && l != colornames.Black {
+                        hex := fmt.Sprintf("%.2X%.2X%.2X", l.R, l.G, l.B)
+                        fmt.Fprint(txt, hex)
+                    }
+                    imd.Color = colornames.White
+                    imd.Push(pos)
+                    imd.Circle(CIRSIZE, 1)
                 }
-                imd.Color = colornames.White
-                imd.Push(l.Pos)
-                imd.Circle(CIRSIZE, 1)
             }
-
         }
 
         if (win.Pressed(pixelgl.KeyLeftControl) || win.Pressed(pixelgl.KeyRightControl)) && win.JustPressed(pixelgl.KeyV) {
-            if coloring != -1 {
+            if !coloring.Eq(ncolor) {
                 clip, _ := clipboard.ReadAll()
                 if clip[0] == '#' {
                     clip = clip[1:]
@@ -383,13 +405,15 @@ func run() {
                 }
             } else if fn > 0 {
                 previous := frames[fn-1]
-                for i, f := range *frame {
-                    *f = *previous[i]
+                for x := 0; x < len(frame); x++ {
+                    for y := 0; y < len(frame[x]); y++ {
+                        frame[x][y] = previous[x][y]
+                    }
                 }
             }
         }
 
-        if coloring != -1 {
+        if !coloring.Eq(ncolor) {
             if len(Text) < 6 {
                 Text += HexIn()
             }
@@ -399,8 +423,8 @@ func run() {
             if win.JustPressed(pixelgl.KeyEnter) && len(Text) == 6 {
                 decode, _ := hex.DecodeString(Text)
                 rgb := color.RGBA{decode[0], decode[1], decode[2], 0xFF}
-                (*frame)[coloring].Color = rgb
-                coloring = -1
+                (*frame)[int(coloring.X)][int(coloring.Y)] = rgb
+                coloring = pixel.V(-1, -1)
                 fmt.Fprint(txt, Text)
                 Text = ""
             }
@@ -426,12 +450,12 @@ func run() {
                 go Load()
             }
             if win.JustPressed(pixelgl.KeyD) {
-                if fn == len(frames)-1 {
+                if fn == 0 {
+                    frame.Init()
+                } else if fn == len(frames)-1 {
                     frames = frames[:len(frames)-1]
                     fn--
                     frame = &frames[fn]
-                } else if fn == 0 {
-                    frameInit(frame)
                 } else {
                     frames = append(frames[:fn], frames[fn+1:]...)
                     frame = &frames[fn]
@@ -549,7 +573,7 @@ func glow(pos pixel.Vec, radius float64, rgb pixel.RGBA) {
             percent = 1
         }
 
-        resultRed, resultGreen, resultBlue := percent*rgb.R, percent*rgb.G, percent*rgb.B
+        resultRed, resultGreen, resultBlue := percent*float64(rgb.R), percent*float64(rgb.G), percent*float64(rgb.B)
         imd.Color = pixel.RGB(resultRed, resultGreen, resultBlue)
         imd.Push(pos)
         imd.Circle(i, 0)
