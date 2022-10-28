@@ -461,6 +461,16 @@ func run() {
                     frame = &frames[fn]
                 }
             }
+            if win.JustPressed(pixelgl.KeyA) {
+                if fn != len(frames)-1 {
+                    newframe := Frame{}
+                    newframe.Init()
+                    frames = append(frames[:fn+2], frames[fn+1:]...)
+                    frames[fn+1] = newframe
+                    fn++
+                    frame = &frames[fn]
+                }
+            }
             if win.JustPressed(pixelgl.KeyI) {
                 Image()
             }
